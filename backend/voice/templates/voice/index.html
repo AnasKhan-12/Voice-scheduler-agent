@@ -1,0 +1,359 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Voice Scheduler</title>
+</head>
+<body>
+  <h2>Voice Scheduling Agent</h2>
+
+  <p id="status">Connecting...</p>
+
+  <h3>Conversation</h3>
+  <pre id="transcript"></pre>
+
+  <hr>
+  <h3>Or type a message</h3>
+  <input id="msg" placeholder="Type a scheduling request">
+  <button id="send">Send</button>
+
+  <script>
+    const statusEl = document.getElementById("status");
+    const transcriptEl = document.getElementById("transcript");
+    const msgBox = document.getElementById("msg");
+
+    const wsProtocol =
+      location.protocol === "https:" ? "wss:" : "ws:";
+
+    const ws = new WebSocket(
+      `${wsProtocol}//${location.host}/ws/voice/`
+    );
+
+    ws.binaryType = "arraybuffer";
+
+    let playCtx = null;
+    let nextTime = 0;
+
+    let stream = null;
+    let audioCtx = null;
+    let source = null;
+    let worklet = null;
+
+    let speaking = false;
+    let processing = false;
+    let silenceTime = 0;
+
+    const SAMPLE_RATE = 16000;
+    const VAD_THRESHOLD = 0.015;
+    const SILENCE_LIMIT = 0.8;
+    const PREROLL_FRAMES = 8;
+
+    let preRoll = [];
+    let pending = [];
+    let pendingLen = 0;
+
+    function addLine(who, text) {
+      transcriptEl.textContent += `${who}: ${text}\n`;
+      transcriptEl.scrollTop = transcriptEl.scrollHeight;
+    }
+
+    ws.onopen = async () => {
+      statusEl.textContent = "Connected. Starting microphone...";
+      try {
+        await startListening();
+      } catch (err) {
+        statusEl.textContent =
+          `Microphone error: ${err.name} - ${err.message}`;
+      }
+    };
+
+    ws.onclose = () => {
+      statusEl.textContent = "Disconnected. Refresh to reconnect.";
+      stopMicrophone();
+    };
+
+    ws.onerror = () => {
+      statusEl.textContent = "WebSocket connection error.";
+    };
+
+    ws.onmessage = (e) => {
+      if (typeof e.data !== "string") {
+        playChunk(e.data);
+        return;
+      }
+
+      const data = JSON.parse(e.data);
+
+      if (data.type === "status") {
+        statusEl.textContent = data.text;
+        if (data.text === "done") {
+          processing = false;
+        }
+      }
+
+      if (data.type === "transcript") {
+        if (data.text) {
+          addLine("You", data.text);
+        } else {
+          statusEl.textContent = "No speech detected. Listening...";
+          processing = false;
+        }
+      }
+
+      if (data.type === "reply") {
+        addLine("Agent", data.text);
+      }
+
+      if (data.type === "error") {
+        addLine("Error", data.text);
+        processing = false;
+      }
+
+      if (data.type === "tts_start") {
+        nextTime = 0;
+      }
+
+      if (data.type === "tts_end") {
+        processing = false;
+        statusEl.textContent = "Listening...";
+      }
+    };
+
+    // ---- Speech playback ----
+
+    function playChunk(arrayBuffer) {
+      if (!playCtx) {
+        playCtx = new AudioContext({ sampleRate: 24000 });
+      }
+
+      if (playCtx.state !== "running") {
+        // Browsers may require a user gesture to enable audio.
+        return;
+      }
+
+      const samples = new Float32Array(arrayBuffer);
+      const buffer = playCtx.createBuffer(
+        1, samples.length, 24000
+      );
+
+      buffer.copyToChannel(samples, 0);
+
+      const src = playCtx.createBufferSource();
+      src.buffer = buffer;
+      src.connect(playCtx.destination);
+
+      const startAt = Math.max(
+        playCtx.currentTime, nextTime
+      );
+
+      src.start(startAt);
+      nextTime = startAt + buffer.duration;
+    }
+
+    // A click anywhere can unlock browser audio playback
+    // if autoplay restrictions prevent spoken responses.
+    document.addEventListener("click", () => {
+      if (playCtx && playCtx.state === "suspended") {
+        playCtx.resume();
+      }
+    });
+
+    // ---- Audio buffering ----
+
+    function flushAudio() {
+      if (pendingLen === 0 || ws.readyState !== WebSocket.OPEN) {
+        pending = [];
+        pendingLen = 0;
+        return;
+      }
+
+      const output = new Float32Array(pendingLen);
+      let offset = 0;
+
+      for (const frame of pending) {
+        output.set(frame, offset);
+        offset += frame.length;
+      }
+
+      ws.send(output.buffer);
+
+      pending = [];
+      pendingLen = 0;
+    }
+
+    function appendAudio(frame) {
+      pending.push(frame);
+      pendingLen += frame.length;
+
+      if (pendingLen >= 4096) {
+        flushAudio();
+      }
+    }
+
+    function finishUtterance() {
+      flushAudio();
+
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "stop" }));
+        processing = true;
+        statusEl.textContent = "Transcribing your speech...";
+      }
+
+      speaking = false;
+      silenceTime = 0;
+      preRoll = [];
+    }
+
+    // ---- Automatic speech detection ----
+
+    function handleFrame(frame) {
+      if (processing) return;
+
+      let sumSquares = 0;
+
+      for (let i = 0; i < frame.length; i++) {
+        sumSquares += frame[i] * frame[i];
+      }
+
+      const rms = Math.sqrt(sumSquares / frame.length);
+      const isSpeech = rms > VAD_THRESHOLD;
+
+      if (!speaking && isSpeech) {
+        // Start a new utterance automatically.
+        speaking = true;
+        silenceTime = 0;
+
+        if (ws.readyState !== WebSocket.OPEN) return;
+
+        ws.send(JSON.stringify({ type: "start" }));
+
+        // Include a small amount of audio before speech onset.
+        for (const previousFrame of preRoll) {
+          appendAudio(previousFrame);
+        }
+
+        appendAudio(frame);
+        statusEl.textContent = "Listening to your speech...";
+      } else if (speaking) {
+        appendAudio(frame);
+
+        if (isSpeech) {
+          silenceTime = 0;
+        } else {
+          silenceTime += frame.length / SAMPLE_RATE;
+        }
+
+        if (silenceTime >= SILENCE_LIMIT) {
+          finishUtterance();
+        }
+      }
+
+      if (!speaking && !processing) {
+        preRoll.push(frame);
+
+        if (preRoll.length > PREROLL_FRAMES) {
+          preRoll.shift();
+        }
+      }
+    }
+
+    // ---- Microphone startup ----
+
+    async function startListening() {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
+
+      audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
+      await audioCtx.resume();
+
+      if (audioCtx.sampleRate !== SAMPLE_RATE) {
+        throw new Error(
+          `Expected 16000 Hz audio; browser provided ${audioCtx.sampleRate} Hz.`
+        );
+      }
+
+      const workletCode = `
+        class Capture extends AudioWorkletProcessor {
+          process(inputs) {
+            const channel = inputs[0][0];
+
+            if (channel) {
+              this.port.postMessage(channel.slice());
+            }
+
+            return true;
+          }
+        }
+
+        registerProcessor("capture", Capture);
+      `;
+
+      const blob = new Blob(
+        [workletCode],
+        { type: "application/javascript" }
+      );
+
+      const moduleURL = URL.createObjectURL(blob);
+      await audioCtx.audioWorklet.addModule(moduleURL);
+      URL.revokeObjectURL(moduleURL);
+
+      source = audioCtx.createMediaStreamSource(stream);
+      worklet = new AudioWorkletNode(audioCtx, "capture");
+
+      worklet.port.onmessage = (event) => {
+        handleFrame(event.data);
+      };
+
+      const mute = audioCtx.createGain();
+      mute.gain.value = 0;
+
+      source.connect(worklet);
+      worklet.connect(mute);
+      mute.connect(audioCtx.destination);
+
+      statusEl.textContent = "Microphone active. Start speaking.";
+    }
+
+    function stopMicrophone() {
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+        stream = null;
+      }
+
+      if (worklet) {
+        worklet.disconnect();
+        worklet = null;
+      }
+
+      if (source) {
+        source.disconnect();
+        source = null;
+      }
+
+      if (audioCtx && audioCtx.state !== "closed") {
+        audioCtx.close();
+      }
+    }
+
+    // ---- Typed messages remain available ----
+
+    document.getElementById("send").onclick = () => {
+      const text = msgBox.value.trim();
+
+      if (!text || ws.readyState !== WebSocket.OPEN) return;
+
+      addLine("You", text);
+      ws.send(JSON.stringify({ type: "text", text }));
+      msgBox.value = "";
+    };
+  </script>
+</body>
+</html>
