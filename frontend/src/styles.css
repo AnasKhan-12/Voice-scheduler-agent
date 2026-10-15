@@ -97,3 +97,298 @@ ul, ol { padding: 0; list-style: none; }
 .row time { width: 120px; flex: none; color: var(--muted); font-size: 14px; }
 .done { text-decoration: line-through; color: var(--muted); }
 .muted { color: var(--muted); font-size: 14px; }
+
+
+/* ---- Doctors page ---- */
+.doctors-page {
+  max-width: 1160px;
+  margin: 30px auto 0;
+  padding: 0 24px 40px;
+}
+
+.doctors-heading,
+.schedule-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.doctors-heading h1 {
+  font: 400 clamp(2rem, 4vw, 2.8rem)/1.1 var(--serif);
+  margin: 5px 0 8px;
+}
+
+.eyebrow {
+  color: var(--teal);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.13em;
+}
+
+.appointment-total {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.appointment-total span:first-child {
+  color: var(--ink);
+  font: 400 2rem/1.1 var(--serif);
+}
+
+.doctor-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin: 28px 0;
+}
+
+.doctor-card {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-align: left;
+  padding: 18px 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 160ms ease, transform 160ms ease;
+}
+
+.doctor-card:hover {
+  border-color: var(--teal);
+  transform: translateY(-1px);
+}
+
+.doctor-card--active {
+  border-color: var(--teal);
+  box-shadow: inset 0 0 0 1px var(--teal);
+}
+
+.doctor-avatar {
+  flex: 0 0 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--teal) 13%, var(--panel));
+  color: var(--teal);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.doctor-info {
+  min-width: 0;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.doctor-info strong {
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.doctor-info > span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.doctor-indicator {
+  color: var(--teal);
+  font-weight: 700;
+}
+
+.doctor-schedule {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 24px;
+  background: var(--panel);
+}
+
+.schedule-heading {
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.schedule-heading h2 {
+  font: 400 1.8rem/1.2 var(--serif);
+  margin-top: 4px;
+}
+
+.schedule-count {
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.appointment-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.appointment-card {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 20px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.appointment-card:last-child {
+  border-bottom: 0;
+}
+
+.appointment-date {
+  width: 145px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.appointment-date strong {
+  color: var(--ink);
+  font-size: 15px;
+}
+
+.appointment-details {
+  flex: 1;
+  min-width: 0;
+}
+
+.appointment-details h3 {
+  font-size: 15px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.appointment-details p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.appointment-mark {
+  color: var(--teal);
+  font-size: 19px;
+}
+
+.schedule-empty {
+  text-align: center;
+  padding: 52px 16px;
+}
+
+.schedule-empty h3 {
+  margin: 10px 0 4px;
+  font-size: 15px;
+}
+
+.empty-calendar {
+  color: var(--teal);
+  font-size: 32px;
+}
+
+.schedule-error {
+  color: var(--coral);
+  padding: 20px 0;
+}
+
+@media (max-width: 760px) {
+  .doctors-page {
+    padding: 0 16px 32px;
+  }
+
+  .doctor-grid {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .doctor-card {
+    padding: 13px;
+  }
+
+  .doctor-schedule {
+    padding: 16px;
+  }
+
+  .appointment-card {
+    gap: 12px;
+  }
+
+  .appointment-date {
+    width: 115px;
+  }
+}
+
+@media (max-width: 420px) {
+  .doctors-heading {
+    align-items: flex-start;
+  }
+
+  .appointment-total {
+    padding-top: 4px;
+  }
+
+  .appointment-card {
+    align-items: flex-start;
+  }
+
+  .appointment-date {
+    width: 100px;
+  }
+}
+
+.top-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.nav-link {
+  padding: 8px 14px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font: 500 14px var(--sans);
+  cursor: pointer;
+}
+
+.nav-link:hover {
+  color: var(--ink);
+  background: var(--panel);
+}
+
+.nav-link--active {
+  color: var(--teal);
+  background: var(--panel);
+  border-color: var(--line);
+}
+
+@media (max-width: 600px) {
+  .top {
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  .top-nav {
+    order: 3;
+    width: 100%;
+  }
+
+  .nav-link {
+    flex: 1;
+  }
+}

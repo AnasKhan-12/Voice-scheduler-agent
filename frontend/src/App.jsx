@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useVoiceAgent } from "./useVoiceAgent.js";
+import DoctorsPage from "./DoctorsPage.jsx";
 
 const LABEL = {
   off: "Ready when you are",
@@ -174,16 +175,45 @@ function Schedule({ refreshKey }) {
 
 export default function App() {
   const v = useVoiceAgent();
+  const [page, setPage] = useState("voice");
   const [draft, setDraft] = useState("");
   const live = v.phase !== "off" && v.phase !== "connecting";
 
   return (
     <div className="app">
+      
       <header className="top">
-        <div className="brand"><span className="brand__mark" />Voice Scheduler</div>
-        <span className={`pill ${live ? "pill--on" : ""}`}>{live ? "Call live" : "Offline"}</span>
+        <div className="brand">
+          <span className="brand__mark" />
+          Voice Scheduler
+        </div>
+
+        <nav className="top-nav" aria-label="Main navigation">
+          <button
+            className={`nav-link ${page === "voice" ? "nav-link--active" : ""}`}
+            onClick={() => setPage("voice")}
+            aria-current={page === "voice" ? "page" : undefined}
+          >
+            Voice Agent
+          </button>
+
+          <button
+            className={`nav-link ${page === "doctors" ? "nav-link--active" : ""}`}
+            onClick={() => setPage("doctors")}
+            aria-current={page === "doctors" ? "page" : undefined}
+          >
+            Doctors
+          </button>
+        </nav>
+
+        <span className={`pill ${live ? "pill--on" : ""}`}>
+          {live ? "Call live" : "Offline"}
+        </span>
       </header>
 
+    {page === "doctors" ? (
+      <DoctorsPage />
+    ) : (
       <main className="grid">
         <section className="stage">
           <Orb phase={v.phase} elRef={v.orbRef} />
@@ -229,7 +259,8 @@ export default function App() {
         </section>
 
         <aside className="plan"><Schedule refreshKey={v.lastReplyAt} /></aside>
-      </main>
+        </main>
+)}
     </div>
   );
 }

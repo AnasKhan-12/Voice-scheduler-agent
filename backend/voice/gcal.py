@@ -31,3 +31,13 @@ def create_event(title, start, end):
     }
     event = _service().events().insert(calendarId="primary", body=body).execute()
     return event["id"]
+
+
+def delete_event(google_event_id):
+    """Delete an event from Google Calendar."""
+    _service().events().delete(
+        calendarId="primary",
+        eventId=google_event_id,
+    ).execute()
+
+    return True

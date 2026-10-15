@@ -16,34 +16,65 @@ def check_availability(date: str, time: str, duration_minutes: int = 30) -> dict
     conflicts = repo.find_conflicts(date, time, duration_minutes)
     return {"available": not conflicts, "conflicts": conflicts}
 
+# need to update conflicts by doctor or patient id 
 
-def create_calendar_event(title: str, date: str, time: str, duration_minutes: int = 30) -> dict:
-    """Create a calendar event such as an appointment. Only call after the user confirmed.
-    If google_calendar_synced is false in the result, the event is saved but did not reach
-    Google Calendar, so tell the user.
+def create_calendar_event(
+    title: str,
+    patient_name: str,
+    date: str,
+    time: str,
+    duration_minutes: int = 30,
+    doctor_id: str = "",
+) -> dict:
+    """Create an appointment for a selected doctor.
 
     Args:
-        title: Short title, for example 'Consultation with Ali'.
-        date: Date as YYYY-MM-DD.
-        time: Start time in 24-hour HH:MM.
-        duration_minutes: Length in minutes.
+        title: Short appointment description.
+        date: Appointment date in YYYY-MM-DD format.
+        time: Start time in 24-hour HH:MM format.
+        duration_minutes: Appointment duration.
+        doctor_id: One of dr_sarah, dr_james, or dr_emily.
     """
-    conflicts = repo.find_conflicts(date, time, duration_minutes)
-    if conflicts:
-        return {"created": False, "reason": "slot is busy", "conflicts": conflicts}
+    valid_doctors = {"dr_sarah", "dr_james", "dr_emily"}
 
-    event = repo.create_event(title, date, time, duration_minutes)
+    if doctor_id not in valid_doctors:
+        return {
+            "created": False,
+            "reason": "A valid doctor must be selected."
+        }
+
+    conflicts = repo.find_conflicts(date, time, duration_minutes)
+
+    if conflicts:
+        return {
+            "created": False,
+            "reason": "slot is busy",
+            "conflicts": conflicts,
+        }
+
+    event = repo.create_event(
+        title, date, time, duration_minutes, doctor_id=doctor_id,patient_name=patient_name
+    )
 
     synced = True
     try:
         start = datetime.fromisoformat(f"{date}T{time}")
-        google_id = gcal.create_event(title, start, start + timedelta(minutes=duration_minutes))
+        google_id = gcal.create_event(
+            title,
+            start,
+            start + timedelta(minutes=duration_minutes),
+        )
         repo.set_google_event_id(event["id"], google_id)
     except Exception as exc:
         synced = False
         print("Google Calendar sync failed:", exc)
 
-    return {"created": True, "event": event, "google_calendar_synced": synced}
+    return {
+        "created": True,
+        "event": event,
+        "google_calendar_synced": synced,
+    }
+
 
 def create_todo(title: str, due: str = "") -> dict:
     """Create a to-do item. Only call after the user confirmed.
@@ -96,6 +127,71 @@ def snooze_task(task_id: int, minutes: int = 60) -> dict:
     new_due = (base + timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M")
     return {"snoozed": True, "task": repo.update_task(task_id, due=new_due)}
 
+def find_appointments(date: str) -> dict:
+    """Find appointments scheduled on a date.
+
+    Args:
+        date: Appointment date in YYYY-MM-DD format.
+    """
+    appointments = repo.find_events_on_date(date)
+
+    return {
+        "appointments": [
+            {
+                "id": str(event["id"]),
+                "title": event["title"],
+                "start": event["start"],
+                "end": event["end"],
+            }
+            for event in appointments
+        ]
+    }
+
+
+def cancel_appointment(event_id: str) -> dict:
+    """Cancel a specific appointment after the patient has confirmed.
+
+    Args:
+        event_id: Exact appointment ID returned by find_appointments.
+    """
+    event = repo.get_event_for_cancellation(event_id)
+
+    if event is None:
+        return {
+            "cancelled": False,
+            "reason": "Appointment not found. It may already be cancelled."
+        }
+
+    google_event_id = event.get("google_event_id")
+
+    # Remove it from Google Calendar first.
+    # If this fails, leave the Supabase record intact.
+    if google_event_id:
+        try:
+            gcal.delete_event(google_event_id)
+        except Exception as exc:
+            print("Google Calendar cancellation failed:", exc)
+            return {
+                "cancelled": False,
+                "reason": "Google Calendar could not confirm the cancellation."
+            }
+
+    deleted = repo.delete_event(event_id)
+
+    if not deleted:
+        return {
+            "cancelled": False,
+            "reason": "The appointment could not be removed from the database."
+        }
+
+    return {
+        "cancelled": True,
+        "appointment": {
+            "title": event["title"],
+            "start": event["start"],
+            "end": event["end"],
+        }
+    }
 
 ALL_TOOLS = [
     check_availability,
@@ -105,4 +201,7 @@ ALL_TOOLS = [
     update_task,
     complete_task,
     snooze_task,
+    find_appointments,
+    cancel_appointment,
 ]
+

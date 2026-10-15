@@ -68,11 +68,23 @@ class SupabaseRepository:
 
         self.db = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
 
-    def list_events(self):
+
+    def list_events(self, doctor_id=None):
         today = datetime.now().date().isoformat()
-        rows = (self.db.table("events").select("*")
-                .gte("end_time", today).order("start_time").execute().data)
+
+        query = (
+            self.db.table("events")
+            .select("*")
+            .gte("end_time", today)
+            .order("start_time")
+        )
+
+        if doctor_id:
+            query = query.eq("doctor_id", doctor_id)
+
+        rows = query.execute().data
         return [self._event(r) for r in rows]
+
 
     @staticmethod
     def _span(date, time, minutes):
@@ -91,14 +103,23 @@ class SupabaseRepository:
         )
         return [self._event(r) for r in rows]
 
-    def create_event(self, title, date, time, minutes):
+    def create_event(self, title, date, time, minutes,
+                    patient_name, doctor_id
+                    ):
         start, end = self._span(date, time, minutes)
         row = (
             self.db.table("events")
-            .insert({"title": title, "start_time": start.isoformat(), "end_time": end.isoformat()})
+            .insert({
+                "title": title,
+                "patient_name": patient_name,
+                "doctor_id": doctor_id,
+                "start_time": start.isoformat(),
+                "end_time": end.isoformat(),
+            })
             .execute()
             .data[0]
         )
+
         return self._event(row)
 
     def create_task(self, title, due):
@@ -131,9 +152,12 @@ class SupabaseRepository:
         return {
             "id": r["id"],
             "title": r["title"],
+            "patient_name": r.get("patient_name"),
+            "doctor_id": r.get("doctor_id"),
             "start": r["start_time"].replace("T", " ")[:16],
             "end": r["end_time"].replace("T", " ")[:16],
         }
+
 
     @staticmethod
     def _task(r):
@@ -146,3 +170,69 @@ class SupabaseRepository:
 
     def set_google_event_id(self, event_id, google_id):
         self.db.table("events").update({"google_event_id": google_id}).eq("id", event_id).execute()
+
+    # to find appointments on a given day
+    def find_events_on_date(self, date):
+        """Find appointments starting on a particular date."""
+        from datetime import date as date_type, timedelta
+
+        selected_date = date_type.fromisoformat(date)
+        next_date = selected_date + timedelta(days=1)
+
+        rows = (
+            self.db.table("events")
+            .select("*")
+            .gte("start_time", selected_date.isoformat())
+            .lt("start_time", next_date.isoformat())
+            .order("start_time")
+            .execute()
+            .data
+        )
+
+        return [
+            {
+                **self._event(row),
+                "google_event_id": row.get("google_event_id"),
+            }
+            for row in rows
+        ]
+
+    def get_event(self, event_id):
+        rows = (
+            self.db.table("events")
+            .select("*")
+            .eq("id", event_id)
+            .execute()
+            .data
+        )
+    #to remove/ delete a meeting
+    def delete_event(self, event_id):
+        """Delete an appointment from Supabase."""
+        result = (
+            self.db.table("events")
+            .delete()
+            .eq("id", event_id)
+            .execute()
+        )
+        return bool(result.data)
+
+
+    def get_event_for_cancellation(self, event_id):
+        """Retrieve one appointment and its Google Calendar ID."""
+        rows = (
+            self.db.table("events")
+            .select("*")
+            .eq("id", event_id)
+            .execute()
+            .data
+        )
+
+        if not rows:
+            return None
+
+        row = rows[0]
+
+        return {
+            **self._event(row),
+            "google_event_id": row.get("google_event_id"),
+        }

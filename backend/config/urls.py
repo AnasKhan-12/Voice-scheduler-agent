@@ -9,4 +9,5 @@ urlpatterns = [
     path("api/health/", views.health),
     path("api/events/", views.events),   # new
     path("api/tasks/", views.tasks),
+    path("api/doctors/", views.doctors),
 ]
