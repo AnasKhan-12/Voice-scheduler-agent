@@ -7,7 +7,7 @@ import numpy as np
 from channels.generic.websocket import AsyncWebsocketConsumer
 
 from . import stt, tts
-from .llm_gemini import Agent
+from .llm import Agent
 
 
 def _warm_up():
