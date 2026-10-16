@@ -171,6 +171,44 @@ class SupabaseRepository:
     def set_google_event_id(self, event_id, google_id):
         self.db.table("events").update({"google_event_id": google_id}).eq("id", event_id).execute()
 
+    def get_event_for_rescheduling(self, event_id):
+        """Get an existing appointment and its Google Calendar ID."""
+        rows = (
+            self.db.table("events")
+            .select("*")
+            .eq("id", event_id)
+            .execute()
+            .data
+        )
+
+        if not rows:
+            return None
+
+        row = rows[0]
+        return {
+            "id": row["id"],
+            "title": row["title"],
+            "start": row["start_time"],
+            "end": row["end_time"],
+            "google_event_id": row.get("google_event_id"),
+        }
+
+
+    def update_event_times(self, event_id, start, end):
+        """Update the existing appointment's time in Supabase."""
+        rows = (
+            self.db.table("events")
+            .update({
+                "start_time": start.isoformat(),
+                "end_time": end.isoformat(),
+            })
+            .eq("id", event_id)
+            .execute()
+            .data
+        )
+
+        return self._event(rows[0]) if rows else None
+
     # to find appointments on a given day
     def find_events_on_date(self, date):
         """Find appointments starting on a particular date."""

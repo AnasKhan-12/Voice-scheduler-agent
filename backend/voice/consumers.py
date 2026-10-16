@@ -9,6 +9,7 @@ from channels.generic.websocket import AsyncWebsocketConsumer
 from . import stt, tts
 from .llm import Agent
 
+SLICE_SAMPLES = 24000 * 2  # 2 seconds of audio per message
 
 def _warm_up():
     try:
@@ -142,7 +143,8 @@ class VoiceConsumer(AsyncWebsocketConsumer):
                 print(f"TIMING tts: first audio after {time.perf_counter() - t0:.1f}s")
                 first = False
             audio_sec += len(chunk) / 24000
-            await self.send(bytes_data=chunk.tobytes())
+            for i in range(0, len(chunk), SLICE_SAMPLES):
+                await self.send(bytes_data=chunk[i:i + SLICE_SAMPLES].tobytes())
         print(f"TIMING tts: {audio_sec:.1f}s of speech made in {time.perf_counter() - t0:.1f}s")
         await self.send_json({"type": "tts_end"})
 

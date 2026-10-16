@@ -1,6 +1,5 @@
-
 import { useEffect, useState } from "react";
-
+import ReminderBell from "./ReminderBell"; 
 const toDate = (value) => new Date(value.replace(" ", "T"));
 
 const formatTime = (date) =>
@@ -130,6 +129,9 @@ export default function DoctorsPage() {
         <div>
           <p className="eyebrow">CLINIC WORKSPACE</p>
           <h1>Doctor appointments</h1>
+          <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <ReminderBell doctorId={selectedDoctor.id}/>
+          </header>
           <p className="muted">
             Select a doctor to view their upcoming schedule.
           </p>

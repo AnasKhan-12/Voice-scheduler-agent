@@ -75,6 +75,97 @@ def create_calendar_event(
         "google_calendar_synced": synced,
     }
 
+def reschedule_appointment(
+    event_id: str,
+    new_date: str,
+    new_time: str,
+    duration_minutes: int = 30,
+) -> dict:
+    """Reschedule an existing appointment after the patient confirms.
+
+    Args:
+        event_id: Exact appointment ID returned by list_events.
+        new_date: New date as YYYY-MM-DD.
+        new_time: New start time in 24-hour HH:MM format.
+        duration_minutes: Appointment duration in minutes.
+    """
+    event = repo.get_event_for_rescheduling(event_id)
+
+    if event is None:
+        return {
+            "rescheduled": False,
+            "reason": "Appointment not found.",
+        }
+
+    # Check whether the new time conflicts with another appointment.
+    conflicts = repo.find_conflicts(
+        new_date,
+        new_time,
+        duration_minutes,
+    )
+
+    # Exclude the appointment being rescheduled from the conflict check.
+    conflicts = [
+        conflict for conflict in conflicts
+        if str(conflict["id"]) != str(event_id)
+    ]
+
+    if conflicts:
+        return {
+            "rescheduled": False,
+            "reason": "The requested time is unavailable.",
+            "conflicts": conflicts,
+        }
+
+    try:
+        new_start = datetime.fromisoformat(f"{new_date}T{new_time}")
+        new_end = new_start + timedelta(minutes=duration_minutes)
+    except ValueError:
+        return {
+            "rescheduled": False,
+            "reason": "Invalid date or time format.",
+        }
+
+    google_event_id = event.get("google_event_id")
+    google_synced = False
+
+    # Update the existing Google Calendar event first.
+    if google_event_id:
+        try:
+            gcal.reschedule_event(
+                google_event_id,
+                new_start,
+                new_end,
+            )
+            google_synced = True
+        except Exception as exc:
+            print("Google Calendar rescheduling failed:", exc)
+            return {
+                "rescheduled": False,
+                "reason": "Google Calendar could not update the appointment.",
+            }
+
+    # Update the same Supabase row; do not insert a new one.
+    updated_event = repo.update_event_times(
+        event_id,
+        new_start,
+        new_end,
+    )
+
+    if updated_event is None:
+        return {
+            "rescheduled": False,
+            "reason": (
+                "The calendar may have changed, but the database update failed. "
+                "Please check both systems before retrying."
+            ),
+        }
+
+    return {
+        "rescheduled": True,
+        "event": updated_event,
+        "google_calendar_synced": google_synced,
+    }
 
 def create_todo(title: str, due: str = "") -> dict:
     """Create a to-do item. Only call after the user confirmed.
@@ -196,6 +287,7 @@ def cancel_appointment(event_id: str) -> dict:
 ALL_TOOLS = [
     check_availability,
     create_calendar_event,
+    reschedule_appointment,
     create_todo,
     list_tasks,
     update_task,

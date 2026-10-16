@@ -32,6 +32,29 @@ def create_event(title, start, end):
     event = _service().events().insert(calendarId="primary", body=body).execute()
     return event["id"]
 
+def reschedule_event(google_event_id, start, end):
+    """Update an existing Google Calendar event's time."""
+    body = {
+        "start": {
+            "dateTime": start.isoformat(),
+            "timeZone": TIMEZONE,
+        },
+        "end": {
+            "dateTime": end.isoformat(),
+            "timeZone": TIMEZONE,
+        },
+    }
+
+    return (
+        _service()
+        .events()
+        .patch(
+            calendarId="primary",
+            eventId=google_event_id,
+            body=body,
+        )
+        .execute()
+    )
 
 def delete_event(google_event_id):
     """Delete an event from Google Calendar."""

@@ -1,0 +1,52 @@
+.reminder-bell { position: relative; display: inline-block; font-family: "Hanken Grotesk", system-ui, sans-serif; }
+
+.reminder-bell__button {
+  position: relative; display: grid; place-items: center;
+  width: 40px; height: 40px; border-radius: 50%;
+  border: 1px solid rgba(128,128,128,.3); background: transparent;
+  color: inherit; cursor: pointer;
+}
+.reminder-bell__button:hover { background: rgba(128,128,128,.12); }
+
+.reminder-bell__dot {
+  position: absolute; top: 7px; right: 8px; width: 10px; height: 10px;
+  border-radius: 50%; background: #e5484d; border: 2px solid #fff;
+  animation: reminder-pulse 1.6s infinite;
+}
+@keyframes reminder-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(229,72,77,.6); }
+  70%  { box-shadow: 0 0 0 8px rgba(229,72,77,0); }
+  100% { box-shadow: 0 0 0 0 rgba(229,72,77,0); }
+}
+
+.reminder-bell__panel {
+  position: absolute; right: 0; top: 48px; z-index: 50; width: 300px;
+  padding: 16px; border-radius: 12px; background: #fff; color: #1a1a1a;
+  box-shadow: 0 8px 30px rgba(0,0,0,.18); border: 1px solid rgba(0,0,0,.08);
+}
+.reminder-bell__message { margin: 0 0 4px; font-size: 15px; line-height: 1.4; }
+.reminder-bell__sub, .reminder-bell__more, .reminder-bell__empty { margin: 0 0 12px; font-size: 13px; color: #666; }
+.reminder-bell__more { margin: 12px 0 0; }
+
+.reminder-bell__actions { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.reminder-bell__actions button {
+  padding: 8px 0; border-radius: 8px; border: 1px solid rgba(0,0,0,.15);
+  background: #f5f5f5; font: inherit; font-size: 13px; cursor: pointer;
+}
+.reminder-bell__actions button:hover { background: #ebebeb; }
+.reminder-bell__actions .reminder-bell__done { background: #1a7f5a; border-color: #1a7f5a; color: #fff; }
+.reminder-bell__actions .reminder-bell__done:hover { background: #166b4c; }
+
+@media (prefers-color-scheme: dark) {
+  .reminder-bell__panel { background: #222; color: #eee; border-color: rgba(255,255,255,.12); }
+  .reminder-bell__sub, .reminder-bell__more, .reminder-bell__empty { color: #aaa; }
+  .reminder-bell__actions button { background: #333; color: #eee; border-color: rgba(255,255,255,.15); }
+  .reminder-bell__dot { border-color: #222; }
+}
+
+.reminder-bell {
+  position: fixed;
+  top: 16px;
+  right: 24px;
+  z-index: 100;
+}
