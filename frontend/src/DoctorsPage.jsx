@@ -130,7 +130,7 @@ export default function DoctorsPage() {
           <p className="eyebrow">CLINIC WORKSPACE</p>
           <h1>Doctor appointments</h1>
           <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <ReminderBell doctorId={selectedDoctor.id}/>
+            <ReminderBell key={selectedDoctor} doctorId={selectedDoctor} />
           </header>
           <p className="muted">
             Select a doctor to view their upcoming schedule.

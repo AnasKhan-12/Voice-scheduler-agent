@@ -3,35 +3,50 @@ import "./ReminderBell.css";
 
 const POLL_MS = 30_000; // how often we ask Django for upcoming appointments
 const TICK_MS = 5_000; // how often we re-check snoozes
-const SNOOZE_OPTIONS = [5, 10, 30];
+const SNOOZE_OPTIONS = [10, 20]; // minutes
 
-// "2026-10-16 15:30" -> Date (local time, same clock the server uses)
+// "2026-10-16 15:30" -> Date. Only used to DISPLAY the clinic's wall-clock time.
 const parseStart = (s) => new Date(s.replace(" ", "T"));
 const formatTime = (s) =>
   parseStart(s).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+
+// Whole minutes until the appointment (rounded up, never negative).
+const minutesLeft = (r, now) => Math.max(0, Math.ceil((r.startAt - now) / 60_000));
+
+const minutesPhrase = (mins) =>
+  mins <= 0 ? "right now" : mins === 1 ? "in 1 minute" : `in ${mins} minutes`;
+
+// What the voice agent says when the bell is clicked.
+const spokenMessage = (r, mins) =>
+  `You have an appointment with ${r.patient_name} ${minutesPhrase(mins)}. ` +
+  `Would you like to snooze for 10 or 20 minutes, or mark it done?`;
+
+// The voice agent's own Kokoro voice, rendered by Django.
+const speakUrl = (text) => `/api/speak/?text=${encodeURIComponent(text)}`;
 
 // Turn what the doctor said into an action, or null if we didn't understand.
 function parseAnswer(text) {
   const t = text.toLowerCase();
   if (/\b(done|dismiss|okay|ok|got it|stop|no)\b/.test(t)) return { type: "done" };
-  if (/\b(5|five)\b/.test(t)) return { type: "snooze", minutes: 5 };
   if (/\b(10|ten)\b/.test(t)) return { type: "snooze", minutes: 10 };
-  if (/\b(30|thirty)\b/.test(t)) return { type: "snooze", minutes: 30 };
+  if (/\b(20|twenty)\b/.test(t)) return { type: "snooze", minutes: 20 };
   return null;
 }
 
 /**
  * Bell icon with a red dot when the doctor has an appointment starting
- * within 30 minutes. Clicking it opens the reminder, speaks it aloud and
- * asks whether to snooze (5 / 10 / 30 min) or mark it done.
+ * within 30 minutes. Clicking it opens the reminder, has the voice agent
+ * speak it aloud, and offers Snooze 10 / Snooze 20 / Done (by tapping or
+ * by saying "ten", "twenty" or "done").
  *
- * Usage:  <ReminderBell doctorId="dr_sarah" />
+ * Usage:  <ReminderBell key={doctorId} doctorId="dr_sarah" />
  */
 export default function ReminderBell({ doctorId }) {
   const [reminders, setReminders] = useState([]);
   const [open, setOpen] = useState(false);
   const [now, setNow] = useState(Date.now());
   const [listening, setListening] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
 
   // Snoozes / dismissals survive a page refresh (per doctor).
   const storeKey = `reminder-state:${doctorId}`;
@@ -49,6 +64,8 @@ export default function ReminderBell({ doctorId }) {
   }, [state, storeKey]);
 
   const recognitionRef = useRef(null);
+  const audioRef = useRef(null);
+  const speechIdRef = useRef(0); // bumping this cancels callbacks of any older utterance
   const retriesRef = useRef(0); // "didn't catch that" re-prompts, capped at 1
 
   // ---- fetch upcoming appointments ----
@@ -59,7 +76,18 @@ export default function ReminderBell({ doctorId }) {
       try {
         const res = await fetch(`/api/reminders/?doctor_id=${encodeURIComponent(doctorId)}`);
         const data = await res.json();
-        if (!cancelled) setReminders(data.reminders || []);
+        if (cancelled) return;
+        const fetchedAt = Date.now();
+        setReminders(
+          (data.reminders || []).map((r) => ({
+            ...r,
+            // Start time on the browser's clock, based on the server's "seconds until".
+            startAt:
+              r.seconds_until != null
+                ? fetchedAt + r.seconds_until * 1000
+                : parseStart(r.start).getTime(),
+          }))
+        );
       } catch (err) {
         console.error("Could not load reminders", err);
       }
@@ -83,13 +111,30 @@ export default function ReminderBell({ doctorId }) {
     (r) => !state.done.includes(r.id) && (state.snoozed[r.id] || 0) <= now
   );
   const current = active[0];
+  const mins = current ? minutesLeft(current, now) : null;
+
+  // Warm the server's audio cache while the red dot is showing, so the voice
+  // starts instantly when the doctor clicks. (Re-runs when the minute changes.)
+  useEffect(() => {
+    if (!current) return;
+    fetch(speakUrl(spokenMessage(current, mins))).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current?.id, current?.patient_name, mins]);
 
   // ---- voice ----
   const stopVoice = useCallback(() => {
+    speechIdRef.current++; // any pending "finished speaking" callback is now stale
+    const audio = audioRef.current;
+    if (audio) {
+      audio.onended = audio.onerror = null;
+      audio.pause();
+      audioRef.current = null;
+    }
     window.speechSynthesis?.cancel();
     recognitionRef.current?.abort?.();
     recognitionRef.current = null;
     setListening(false);
+    setSpeaking(false);
   }, []);
 
   const respond = useCallback(
@@ -98,10 +143,12 @@ export default function ReminderBell({ doctorId }) {
       if (action.type === "done") {
         setState((s) => ({ ...s, done: [...s.done, reminder.id] }));
       } else {
-        // Never snooze past the appointment start - ring at the start time instead.
+        // Ring again after the snooze, but never later than 1 minute before the
+        // appointment starts (and never sooner than 1 minute from now).
+        const t = Date.now();
         const until = Math.min(
-          Date.now() + action.minutes * 60_000,
-          parseStart(reminder.start).getTime()
+          t + action.minutes * 60_000,
+          Math.max(reminder.startAt - 60_000, t + 60_000)
         );
         setState((s) => ({ ...s, snoozed: { ...s.snoozed, [reminder.id]: until } }));
       }
@@ -128,7 +175,7 @@ export default function ReminderBell({ doctorId }) {
         }
         // Didn't catch it - ask once more, then leave it to the buttons.
         if (retriesRef.current++ < 1) {
-          speak(reminder, "Sorry, please say done, five, ten, or thirty minutes.");
+          speak(reminder, "Sorry, please say ten minutes, twenty minutes, or done.");
         }
       };
       recognitionRef.current = rec;
@@ -140,16 +187,36 @@ export default function ReminderBell({ doctorId }) {
     [respond]
   );
 
+  // Speak `text` with the voice agent's voice; when finished, listen for the answer.
   const speak = useCallback(
     (reminder, text) => {
-      if (!("speechSynthesis" in window)) return;
-      window.speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(text);
-      u.rate = 1.0;
-      u.onend = () => listenForAnswer(reminder);
-      window.speechSynthesis.speak(u);
+      stopVoice();
+      const id = ++speechIdRef.current;
+      const finished = () => {
+        if (speechIdRef.current !== id) return; // superseded or cancelled
+        setSpeaking(false);
+        listenForAnswer(reminder);
+      };
+
+      // Fallback if the server voice is unavailable: the browser's built-in voice.
+      let usedFallback = false;
+      const fallback = () => {
+        if (usedFallback || speechIdRef.current !== id) return;
+        usedFallback = true;
+        if (!("speechSynthesis" in window)) return setSpeaking(false);
+        const u = new SpeechSynthesisUtterance(text);
+        u.onend = finished;
+        window.speechSynthesis.speak(u);
+      };
+
+      const audio = new Audio(speakUrl(text));
+      audioRef.current = audio;
+      audio.onended = finished;
+      audio.onerror = fallback;
+      setSpeaking(true);
+      audio.play().catch(fallback);
     },
-    [listenForAnswer]
+    [stopVoice, listenForAnswer]
   );
 
   const handleBellClick = () => {
@@ -160,21 +227,20 @@ export default function ReminderBell({ doctorId }) {
     }
     setOpen(true);
     retriesRef.current = 0;
-    if (current) {
-      const mins = Math.max(
-        0,
-        Math.ceil((parseStart(current.start).getTime() - Date.now()) / 60_000)
-      );
-      speak(
-        current,
-        `You have a meeting with ${current.patient_name} at ${formatTime(current.start)}, ` +
-          `in ${mins} minutes. Would you like to snooze for 5, 10, or 30 minutes, or mark it done?`
-      );
-    }
+    // One timestamp for both, so the panel and the voice always say the same number.
+    const t = Date.now();
+    setNow(t);
+    if (current) speak(current, spokenMessage(current, minutesLeft(current, t)));
   };
 
   // Stop talking if the component goes away.
   useEffect(() => stopVoice, [stopVoice]);
+
+  const status = speaking
+    ? "Speaking…"
+    : listening
+    ? "Listening… say 10, 20 or done"
+    : "Snooze or mark as done?";
 
   return (
     <div className="reminder-bell">
@@ -201,16 +267,21 @@ export default function ReminderBell({ doctorId }) {
           ) : (
             <>
               <p className="reminder-bell__message">
-                You have a meeting with <strong>{current.patient_name}</strong> at{" "}
-                <strong>{formatTime(current.start)}</strong>.
+                You have an appointment with <strong>{current.patient_name}</strong>{" "}
+                {mins <= 0 ? (
+                  <strong>right now</strong>
+                ) : (
+                  <>
+                    in <strong>{mins} {mins === 1 ? "min" : "mins"}</strong>
+                  </>
+                )}{" "}
+                ({formatTime(current.start)}).
               </p>
-              <p className="reminder-bell__sub">
-                {listening ? "Listening… say done, 5, 10 or 30" : "Snooze or mark as done?"}
-              </p>
+              <p className="reminder-bell__sub" aria-live="polite">{status}</p>
               <div className="reminder-bell__actions">
                 {SNOOZE_OPTIONS.map((m) => (
                   <button key={m} onClick={() => respond(current, { type: "snooze", minutes: m })}>
-                    {m} min
+                    Snooze {m} min
                   </button>
                 ))}
                 <button
