@@ -47,6 +47,7 @@ export default function ReminderBell({ doctorId }) {
   const [now, setNow] = useState(Date.now());
   const [listening, setListening] = useState(false);
   const [speaking, setSpeaking] = useState(false);
+  const [voiceError, setVoiceError] = useState("");
 
   // Snoozes / dismissals survive a page refresh (per doctor).
   const storeKey = `reminder-state:${doctorId}`;
@@ -130,7 +131,6 @@ export default function ReminderBell({ doctorId }) {
       audio.pause();
       audioRef.current = null;
     }
-    window.speechSynthesis?.cancel();
     recognitionRef.current?.abort?.();
     recognitionRef.current = null;
     setListening(false);
@@ -187,34 +187,42 @@ export default function ReminderBell({ doctorId }) {
     [respond]
   );
 
-  // Speak `text` with the voice agent's voice; when finished, listen for the answer.
+  // Speak `text` with the Kokoro voice (rendered by Django at /api/speak/).
+  // When it finishes, listen for the doctor's answer. There is deliberately NO
+  // browser-voice fallback: if Kokoro fails, the panel shows why.
   const speak = useCallback(
-    (reminder, text) => {
+    async (reminder, text) => {
       stopVoice();
       const id = ++speechIdRef.current;
-      const finished = () => {
-        if (speechIdRef.current !== id) return; // superseded or cancelled
-        setSpeaking(false);
-        listenForAnswer(reminder);
-      };
-
-      // Fallback if the server voice is unavailable: the browser's built-in voice.
-      let usedFallback = false;
-      const fallback = () => {
-        if (usedFallback || speechIdRef.current !== id) return;
-        usedFallback = true;
-        if (!("speechSynthesis" in window)) return setSpeaking(false);
-        const u = new SpeechSynthesisUtterance(text);
-        u.onend = finished;
-        window.speechSynthesis.speak(u);
-      };
-
-      const audio = new Audio(speakUrl(text));
-      audioRef.current = audio;
-      audio.onended = finished;
-      audio.onerror = fallback;
+      setVoiceError("");
       setSpeaking(true);
-      audio.play().catch(fallback);
+      try {
+        const res = await fetch(speakUrl(text));
+        if (!res.ok) {
+          let detail = "";
+          try {
+            detail = (await res.json()).error;
+          } catch {}
+          throw new Error(detail || `server returned ${res.status}`);
+        }
+        const blob = await res.blob();
+        if (speechIdRef.current !== id) return; // cancelled while loading
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audioRef.current = audio;
+        audio.onended = () => {
+          URL.revokeObjectURL(url);
+          if (speechIdRef.current !== id) return;
+          setSpeaking(false);
+          listenForAnswer(reminder);
+        };
+        await audio.play();
+      } catch (err) {
+        if (speechIdRef.current !== id) return;
+        console.error("Kokoro voice failed:", err);
+        setSpeaking(false);
+        setVoiceError(`Voice unavailable (${err.message})`);
+      }
     },
     [stopVoice, listenForAnswer]
   );
@@ -278,6 +286,18 @@ export default function ReminderBell({ doctorId }) {
                 ({formatTime(current.start)}).
               </p>
               <p className="reminder-bell__sub" aria-live="polite">{status}</p>
+              {voiceError && (
+                <p className="reminder-bell__error" role="alert">
+                  {voiceError}{" "}
+                  <button
+                    type="button"
+                    className="reminder-bell__replay"
+                    onClick={() => speak(current, spokenMessage(current, minutesLeft(current, Date.now())))}
+                  >
+                    Try again
+                  </button>
+                </p>
+              )}
               <div className="reminder-bell__actions">
                 {SNOOZE_OPTIONS.map((m) => (
                   <button key={m} onClick={() => respond(current, { type: "snooze", minutes: m })}>

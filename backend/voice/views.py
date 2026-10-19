@@ -69,15 +69,15 @@ def _speech_wav(text):
     """Render text to WAV bytes. Cached, so repeats and pre-fetches are instant."""
     from . import tts  # imported lazily so the model only loads when first needed
 
-    pcm = np.concatenate(list(tts.synthesize(text)))
-    pcm16 = (np.clip(pcm, -1.0, 1.0) * 32767).astype(np.int16)
+    pcm = np.concatenate(list(tts.synthesize(text))) #text = the sound as numbers.... pcm = whole sentence as numbers
+    pcm16 = (np.clip(pcm, -1.0, 1.0) * 32767).astype(np.int16) # int16 means it can store any number between -32768 to 36767 ONLY
     buf = io.BytesIO()
-    with wave.open(buf, "wb") as w:
-        w.setnchannels(1)
+    with wave.open(buf, "wb") as w:  #wav wrapper packages the pcm so media player knows how to read them # adds a header(44 bytes telling computer im a wav file...defines audio format (which is pcm) and other things as well like sample rate,bit depth and at the end the raw data(pcm))
+        w.setnchannels(1) # channel means is the audio mono or stereo...mono same in both speaker...stereo first left then right then etc
         w.setsampwidth(2)
         w.setframerate(TTS_RATE)
-        w.writeframes(pcm16.tobytes())
-    return buf.getvalue()
+        w.writeframes(pcm16.tobytes()) # pushes audio numbers in after the heaer 
+    return buf.getvalue() # return finished file as bytes??????
 
 
 def speak(request):

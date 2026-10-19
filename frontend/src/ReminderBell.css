@@ -50,3 +50,6 @@
   right: 24px;
   z-index: 100;
 }
+
+.reminder-bell__error { margin: 0 0 12px; font-size: 12px; color: #c0392b; }
+.reminder-bell__replay { background: none; border: 0; padding: 0; font: inherit; color: inherit; text-decoration: underline; cursor: pointer; }

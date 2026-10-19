@@ -392,3 +392,13 @@ ul, ol { padding: 0; list-style: none; }
     flex: 1;
   }
 }
+
+
+/* Keep user and agent conversation typography consistent */
+.line--you p,
+.line--agent p {
+  font-family: var(--sans);
+  font-size: 1rem;
+  font-weight: 400;
+  line-height: 1.6;
+}
