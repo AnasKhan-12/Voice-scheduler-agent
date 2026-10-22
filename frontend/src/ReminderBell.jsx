@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import "./ReminderBell.css";
 
-const POLL_MS = 30_000; // how often we ask Django for upcoming appointments
-const TICK_MS = 5_000; // how often we re-check snoozes
+const POLL_MS = 10_000; // how often we ask Django for upcoming appointments (so the 30-minute alert is on time)
+const TICK_MS = 1_000; // how often we re-check snoozes (so a snooze ends on time)
 const SNOOZE_OPTIONS = [10, 20]; // minutes
 
 // "2026-10-16 15:30" -> Date. Only used to DISPLAY the clinic's wall-clock time.
 const parseStart = (s) => new Date(s.replace(" ", "T"));
 const formatTime = (s) =>
   parseStart(s).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+// Clock time for a timestamp in ms (used to tell the doctor exactly when the reminder comes back).
+const formatClock = (ms) =>
+  new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 
 // Whole minutes until the appointment (rounded up, never negative).
 const minutesLeft = (r, now) => Math.max(0, Math.ceil((r.startAt - now) / 60_000));
@@ -47,7 +50,6 @@ export default function ReminderBell({ doctorId }) {
   const [now, setNow] = useState(Date.now());
   const [listening, setListening] = useState(false);
   const [speaking, setSpeaking] = useState(false);
-  const [voiceError, setVoiceError] = useState("");
 
   // Snoozes / dismissals survive a page refresh (per doctor).
   const storeKey = `reminder-state:${doctorId}`;
@@ -68,6 +70,9 @@ export default function ReminderBell({ doctorId }) {
   const audioRef = useRef(null);
   const speechIdRef = useRef(0); // bumping this cancels callbacks of any older utterance
   const retriesRef = useRef(0); // "didn't catch that" re-prompts, capped at 1
+  // Alerts already shown ("id:0" = first 30-minute alert, "id:<until>" = after a snooze). Saved with the
+  // rest of the state so a page refresh doesn't repeat an alert that was already shown.
+  const alertedRef = useRef(new Set(state.alerted || []));
 
   // ---- fetch upcoming appointments ----
   useEffect(() => {
@@ -112,15 +117,12 @@ export default function ReminderBell({ doctorId }) {
     (r) => !state.done.includes(r.id) && (state.snoozed[r.id] || 0) <= now
   );
   const current = active[0];
+  // When everything is snoozed: the soonest time a reminder will come back.
+  const nextSnoozeAt = reminders
+    .filter((r) => !state.done.includes(r.id) && (state.snoozed[r.id] || 0) > now)
+    .map((r) => state.snoozed[r.id])
+    .sort((a, b) => a - b)[0];
   const mins = current ? minutesLeft(current, now) : null;
-
-  // Warm the server's audio cache while the red dot is showing, so the voice
-  // starts instantly when the doctor clicks. (Re-runs when the minute changes.)
-  useEffect(() => {
-    if (!current) return;
-    fetch(speakUrl(spokenMessage(current, mins))).catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current?.id, current?.patient_name, mins]);
 
   // ---- voice ----
   const stopVoice = useCallback(() => {
@@ -131,6 +133,7 @@ export default function ReminderBell({ doctorId }) {
       audio.pause();
       audioRef.current = null;
     }
+    window.speechSynthesis?.cancel();
     recognitionRef.current?.abort?.();
     recognitionRef.current = null;
     setListening(false);
@@ -187,45 +190,51 @@ export default function ReminderBell({ doctorId }) {
     [respond]
   );
 
-  // Speak `text` with the Kokoro voice (rendered by Django at /api/speak/).
-  // When it finishes, listen for the doctor's answer. There is deliberately NO
-  // browser-voice fallback: if Kokoro fails, the panel shows why.
+  // Speak `text` with the voice agent's voice; when finished, listen for the answer.
   const speak = useCallback(
-    async (reminder, text) => {
+    (reminder, text) => {
       stopVoice();
       const id = ++speechIdRef.current;
-      setVoiceError("");
-      setSpeaking(true);
-      try {
-        const res = await fetch(speakUrl(text));
-        if (!res.ok) {
-          let detail = "";
-          try {
-            detail = (await res.json()).error;
-          } catch {}
-          throw new Error(detail || `server returned ${res.status}`);
-        }
-        const blob = await res.blob();
-        if (speechIdRef.current !== id) return; // cancelled while loading
-        const url = URL.createObjectURL(blob);
-        const audio = new Audio(url);
-        audioRef.current = audio;
-        audio.onended = () => {
-          URL.revokeObjectURL(url);
-          if (speechIdRef.current !== id) return;
-          setSpeaking(false);
-          listenForAnswer(reminder);
-        };
-        await audio.play();
-      } catch (err) {
-        if (speechIdRef.current !== id) return;
-        console.error("Kokoro voice failed:", err);
+      const finished = () => {
+        if (speechIdRef.current !== id) return; // superseded or cancelled
         setSpeaking(false);
-        setVoiceError(`Voice unavailable (${err.message})`);
-      }
+        listenForAnswer(reminder);
+      };
+
+      // Fallback if the server voice is unavailable: the browser's built-in voice.
+      let usedFallback = false;
+      const fallback = () => {
+        if (usedFallback || speechIdRef.current !== id) return;
+        usedFallback = true;
+        if (!("speechSynthesis" in window)) return setSpeaking(false);
+        const u = new SpeechSynthesisUtterance(text);
+        u.onend = finished;
+        window.speechSynthesis.speak(u);
+      };
+
+      const audio = new Audio(speakUrl(text));
+      audioRef.current = audio;
+      audio.onended = finished;
+      audio.onerror = fallback;
+      setSpeaking(true);
+      audio.play().catch(fallback);
     },
     [stopVoice, listenForAnswer]
   );
+
+  // Automatic alert: the moment a reminder becomes active (30 minutes before the appointment, and again
+  // when a snooze ends) open the panel and speak it, with no click on the bell needed.
+  useEffect(() => {
+    if (!current) return;
+    const key = `${current.id}:${state.snoozed[current.id] || 0}`;
+    if (alertedRef.current.has(key)) return; // already alerted for this one
+    alertedRef.current.add(key);
+    setState((s) => ({ ...s, alerted: [...(s.alerted || []), key] }));
+    retriesRef.current = 0;
+    setOpen(true);
+    speak(current, spokenMessage(current, minutesLeft(current, Date.now())));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current?.id, state.snoozed, speak]);
 
   const handleBellClick = () => {
     if (open) {
@@ -271,7 +280,11 @@ export default function ReminderBell({ doctorId }) {
       {open && (
         <div className="reminder-bell__panel" role="dialog" aria-label="Appointment reminders">
           {!current ? (
-            <p className="reminder-bell__empty">No upcoming appointments in the next 30 minutes.</p>
+            <p className="reminder-bell__empty">
+              {nextSnoozeAt
+                ? `Snoozed. I'll remind you again at ${formatClock(nextSnoozeAt)}.`
+                : "No upcoming appointments in the next 30 minutes."}
+            </p>
           ) : (
             <>
               <p className="reminder-bell__message">
@@ -286,18 +299,6 @@ export default function ReminderBell({ doctorId }) {
                 ({formatTime(current.start)}).
               </p>
               <p className="reminder-bell__sub" aria-live="polite">{status}</p>
-              {voiceError && (
-                <p className="reminder-bell__error" role="alert">
-                  {voiceError}{" "}
-                  <button
-                    type="button"
-                    className="reminder-bell__replay"
-                    onClick={() => speak(current, spokenMessage(current, minutesLeft(current, Date.now())))}
-                  >
-                    Try again
-                  </button>
-                </p>
-              )}
               <div className="reminder-bell__actions">
                 {SNOOZE_OPTIONS.map((m) => (
                   <button key={m} onClick={() => respond(current, { type: "snooze", minutes: m })}>
