@@ -3,10 +3,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 // Same logic as your live-call HTML page, packaged as one React hook.
 const MIC_RATE = 16000;
 const TTS_RATE = 24000;
-const SILENCE_LIMIT = 0.6; // seconds of quiet that end your turn
+const SILENCE_LIMIT = 0.7; // seconds of quiet that end your turn
 const MIN_VOICED = 0.25; // shorter sounds (clicks, coughs) are ignored
 const PREROLL_FRAMES = 8; // audio kept from just before you started talking
 const FLUSH_SAMPLES = 4096; // send mic audio roughly every 0.25 s
+
+// Barge-in (interrupting the agent while it speaks)
+const BARGE_FACTOR = 1; // while the agent talks, your voice must be this much above the normal threshold
+const BARGE_MIN_VOICED = 0.35; // seconds of sustained voice that count as an interruption
+const BARGE_PREROLL_FRAMES = 100; // ~0.8 s of mic audio kept so the start of your sentence isn't lost
 
 const WORKLET_CODE = `
 class Capture extends AudioWorkletProcessor {
@@ -53,7 +58,11 @@ function playChunk(s, arrayBuffer) {
   buf.copyToChannel(samples, 0);
   const src = ctx.createBufferSource();
   src.buffer = buf;
-  src.connect(s.analyser);
+  src.connect(s.outGain || s.analyser);
+  s.sources.push(src);
+  src.onended = () => {
+    s.sources = s.sources.filter((x) => x !== src);
+  };
   const startAt = Math.max(ctx.currentTime, s.nextTime);
   src.start(startAt);
   s.nextTime = startAt + buf.duration;
@@ -76,6 +85,7 @@ export function useVoiceAgent() {
     ws: null, stream: null, micCtx: null, source: null, worklet: null,
     playCtx: null, analyser: null, buf: null, nextTime: 0, raf: 0, timers: [],
     active: false, phase: "off", utterance: false, processing: false, muted: false,
+    outGain: null, sources: [], interrupted: false, bargeVoiced: 0,
     silence: 0, voiced: 0, preRoll: [], pending: [], pendingLen: 0,
     micLevel: 0, smooth: 0, msgId: 0,
     threshold: Number(localStorage.getItem("vs-threshold")) || 0.015,
@@ -96,6 +106,7 @@ export function useVoiceAgent() {
       const s = r.current;
       if (!s.active) return;
       s.processing = false;
+      s.bargeVoiced = 0;
       setPartial("");
       go("listening");
     };
@@ -105,7 +116,10 @@ export function useVoiceAgent() {
 
   const onMessage = useCallback((e) => {
     const s = r.current;
-    if (typeof e.data !== "string") return playChunk(s, e.data);
+    if (typeof e.data !== "string") {
+      if (s.interrupted) return; // drop audio still arriving after an interruption
+      return playChunk(s, e.data);
+    }
     const data = JSON.parse(e.data);
 
     if (data.type === "status") {
@@ -125,14 +139,36 @@ export function useVoiceAgent() {
       addMessage("error", data.text);
       release();
     } else if (data.type === "tts_start") {
+      s.interrupted = false; // a new reply is starting, allow audio again
       s.nextTime = 0;
       go("speaking");
     } else if (data.type === "tts_end") {
+      if (s.interrupted) return;
       // Wait for queued audio to finish so the mic doesn't hear the agent.
       const left = Math.max(0, s.nextTime - (s.playCtx?.currentTime ?? 0));
       release(left * 1000 + 250);
     }
   }, [go, addMessage, release]);
+
+  // Silence the agent immediately and tell the server to stop generating audio.
+  const stopAgentAudio = useCallback(() => {
+    const s = r.current;
+    s.interrupted = true; // ignore any audio still in flight
+    s.timers.forEach(clearTimeout); // cancel the pending release() scheduled by tts_end
+    s.timers = [];
+    // Everything the agent says is routed through one gain node: cutting it silences all queued audio at once.
+    if (s.playCtx && s.analyser) {
+      try { s.outGain?.disconnect(); } catch { /* already disconnected */ }
+      s.outGain = s.playCtx.createGain();
+      s.outGain.connect(s.analyser);
+    }
+    for (const src of s.sources) {
+      try { src.onended = null; src.stop(); src.disconnect(); } catch { /* already stopped */ }
+    }
+    s.sources = [];
+    s.nextTime = 0;
+    if (s.ws?.readyState === WebSocket.OPEN) s.ws.send(JSON.stringify({ type: "interrupt" }));
+  }, []);
 
   const handleFrame = useCallback((frame) => {
     const s = r.current;
@@ -140,7 +176,29 @@ export function useVoiceAgent() {
     for (let i = 0; i < frame.length; i++) sum += frame[i] * frame[i];
     const rms = Math.sqrt(sum / frame.length);
     s.micLevel = s.muted ? 0 : Math.min(1, rms * 8);
-    if (s.processing || s.muted) return;
+    if (s.muted) return;
+
+    const speaking = s.phase === "speaking";
+    // While thinking the mic is still ignored; while the agent speaks we listen for an interruption.
+    if (s.processing && !speaking) return;
+
+    const sec = frame.length / MIC_RATE;
+
+    if (speaking && !s.utterance) {
+      const loud = rms > s.threshold * BARGE_FACTOR;
+      // Leaky counter: a quiet gap between syllables only slows it down instead of resetting it.
+      s.bargeVoiced = loud ? s.bargeVoiced + sec : Math.max(0, s.bargeVoiced - sec * 0.5);
+      if (s.bargeVoiced < BARGE_MIN_VOICED) {
+        s.preRoll.push(frame);
+        if (s.preRoll.length > BARGE_PREROLL_FRAMES) s.preRoll.shift();
+        return;
+      }
+      // Interruption confirmed: stop the agent, then fall through and start a normal utterance.
+      s.bargeVoiced = 0;
+      stopAgentAudio();
+      s.processing = false;
+      go("listening");
+    }
 
     const isSpeech = rms > s.threshold;
 
@@ -156,7 +214,6 @@ export function useVoiceAgent() {
       go("hearing");
     } else if (s.utterance) {
       appendAudio(s, frame);
-      const sec = frame.length / MIC_RATE;
       if (isSpeech) {
         s.silence = 0;
         s.voiced += sec;
@@ -184,7 +241,7 @@ export function useVoiceAgent() {
 
     s.preRoll.push(frame);
     if (s.preRoll.length > PREROLL_FRAMES) s.preRoll.shift();
-  }, [go]);
+  }, [go, stopAgentAudio]);
 
   const cleanup = useCallback(() => {
     const s = r.current;
@@ -205,7 +262,7 @@ export function useVoiceAgent() {
     if (s.playCtx && s.playCtx.state !== "closed") s.playCtx.close();
     Object.assign(s, {
       stream: null, worklet: null, source: null, micCtx: null, playCtx: null,
-      analyser: null, utterance: false, processing: false, pending: [],
+      analyser: null, outGain: null, sources: [], interrupted: false, bargeVoiced: 0, utterance: false, processing: false, pending: [],
       pendingLen: 0, preRoll: [], silence: 0, voiced: 0, micLevel: 0, smooth: 0,
     });
     orbRef.current?.style.setProperty("--level", "0");
@@ -224,6 +281,8 @@ export function useVoiceAgent() {
       await s.playCtx.resume();
       s.analyser = s.playCtx.createAnalyser();
       s.analyser.connect(s.playCtx.destination);
+      s.outGain = s.playCtx.createGain();
+      s.outGain.connect(s.analyser);
       s.buf = new Float32Array(s.analyser.fftSize);
 
       s.stream = await navigator.mediaDevices.getUserMedia({
@@ -295,6 +354,8 @@ export function useVoiceAgent() {
     go("off");
     setMuted(false);
     r.current.muted = false;
+    setMessages([]); // clear the conversation shown on screen
+    r.current.msgId = 0;
   }, [cleanup, go]);
 
   const sendText = useCallback((text) => {

@@ -4,7 +4,7 @@ import numpy as np
 from kokoro_onnx import Kokoro
 
 MODEL_DIR = Path(__file__).resolve().parent.parent / "models"
-MODEL_PATH = os.environ.get("KOKORO_MODEL", str(MODEL_DIR / "kokoro-v1.0.int8.onnx"))
+MODEL_PATH = os.environ.get("KOKORO_MODEL", str(MODEL_DIR / "kokoro-v1.0.onnx"))
 VOICES_PATH = os.environ.get("KOKORO_VOICES", str(MODEL_DIR / "voices-v1.0.bin"))
 VOICE = os.environ.get("KOKORO_VOICE", "af_heart")
 SPEED = 1.2

@@ -74,9 +74,9 @@ class VoiceConsumer(AsyncWebsocketConsumer):
                 last = text
                 await self.send_json({"type": "partial", "text": text})
 
-    async def receive(self, text_data=None, bytes_data=None):
+    async def receive(self, text_data=None, bytes_data=None): #receiving raw binary (bytes) data from browser which is audio data and converts to float32
         if bytes_data:
-            self.chunks.append(np.frombuffer(bytes_data, dtype=np.float32))
+            self.chunks.append(np.frombuffer(bytes_data, dtype=np.float32)) # this lines converts into float32 and appends in chunk list
             return
 
         data = json.loads(text_data)
@@ -96,7 +96,7 @@ class VoiceConsumer(AsyncWebsocketConsumer):
             await self._stop_partials()
             self.chunks = []
 
-        elif kind == "stop":
+        elif kind == "stop":                
             await self._stop_partials()
             if not self.chunks:
                 await self.send_json({"type": "transcript", "text": ""})
@@ -106,10 +106,13 @@ class VoiceConsumer(AsyncWebsocketConsumer):
             await self.send_json({"type": "status", "text": "transcribing..."})
             t0 = time.perf_counter()
             text = await asyncio.to_thread(stt.transcribe, audio)
-            print(f"TIMING stt: {time.perf_counter() - t0:.1f}s for {len(audio) / 16000:.1f}s of audio")
+            print(f"TIMING stt: {time.perf_counter() - t0:.1f}s for {len(audio) / 16000:.1f}s of audio") 
             await self.send_json({"type": "transcript", "text": text})
             if text:
                 await self.handle_user_text(text, speak=True)
+
+
+# calls the agent (llm) and sends the reply back to the browser, optionally speaking it out loud
 
     async def handle_user_text(self, text, speak):
         await self.send_json({"type": "status", "text": "thinking..."})
@@ -124,10 +127,11 @@ class VoiceConsumer(AsyncWebsocketConsumer):
             return
         await self.send_json({"type": "reply", "text": reply})
         if speak:
-            await self.speak(reply)
+            await self.speak(reply) # yahan speak functyion call hrha ha llm response ky sth 
         else:
             await self.send_json({"type": "status", "text": "done"})
 
+# sends the text to the TTS model and streams the audio back to the browser in chunks of 2 seconds each ,,, also converts the float32 back to bytes before sending it to the browser
     async def speak(self, text):
         await self.send_json({"type": "status", "text": "speaking..."})
         await self.send_json({"type": "tts_start"})
