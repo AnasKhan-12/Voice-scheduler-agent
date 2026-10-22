@@ -1,6 +1,9 @@
 import itertools
+import time as _time
 from datetime import datetime, timedelta
 import os
+
+EVENTS_CACHE_SECONDS = 10  # list_events() reuses its last Supabase answer for this long
 
 class InMemoryRepository:
     """Temporary storage. Supabase will replace this with the same methods."""
@@ -67,9 +70,19 @@ class SupabaseRepository:
         from supabase import create_client
 
         self.db = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
+        self._events_cache = {}  # doctor_id (or None) -> (loaded_at, events)
 
+    def _clear_events_cache(self):
+        """Call after any change to the events table so the next read is fresh."""
+        self._events_cache.clear()
 
     def list_events(self, doctor_id=None):
+        # Many browser tabs and the reminder bell ask for this every few seconds. Answer from memory
+        # when the last Supabase read is recent; writes below clear the cache, so changes show at once.
+        hit = self._events_cache.get(doctor_id)
+        if hit and _time.monotonic() - hit[0] < EVENTS_CACHE_SECONDS:
+            return [dict(e) for e in hit[1]]
+
         today = datetime.now().date().isoformat()
 
         query = (
@@ -83,7 +96,9 @@ class SupabaseRepository:
             query = query.eq("doctor_id", doctor_id)
 
         rows = query.execute().data
-        return [self._event(r) for r in rows]
+        events = [self._event(r) for r in rows]
+        self._events_cache[doctor_id] = (_time.monotonic(), events)
+        return [dict(e) for e in events]
 
 
     @staticmethod
@@ -119,6 +134,7 @@ class SupabaseRepository:
             .execute()
             .data[0]
         )
+        self._clear_events_cache()
 
         return self._event(row)
 
@@ -170,6 +186,7 @@ class SupabaseRepository:
 
     def set_google_event_id(self, event_id, google_id):
         self.db.table("events").update({"google_event_id": google_id}).eq("id", event_id).execute()
+        self._clear_events_cache()
 
     def get_event_for_rescheduling(self, event_id):
         """Get an existing appointment and its Google Calendar ID."""
@@ -206,6 +223,7 @@ class SupabaseRepository:
             .execute()
             .data
         )
+        self._clear_events_cache()
 
         return self._event(rows[0]) if rows else None
 
@@ -252,6 +270,7 @@ class SupabaseRepository:
             .eq("id", event_id)
             .execute()
         )
+        self._clear_events_cache()
         return bool(result.data)
 
 

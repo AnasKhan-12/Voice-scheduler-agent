@@ -66,10 +66,15 @@ export default function DoctorsPage() {
     if (!selectedDoctor) return;
 
     let active = true;
+    let lastSeen = ""; // the last list we showed, so an unchanged refresh does nothing
 
-    async function loadAppointments() {
-      setLoadingEvents(true);
-      setError("");
+    // showLoading is true only for the first load (and when the doctor changes).
+    // Background refreshes are silent, so the list never flips to "Loading appointments…".
+    async function loadAppointments(showLoading) {
+      if (showLoading) {
+        setLoadingEvents(true);
+        setError("");
+      }
 
       try {
         const response = await fetch(
@@ -83,32 +88,44 @@ export default function DoctorsPage() {
         const data = await response.json();
 
         if (active) {
-          setEvents(
-            data.events
-              .map((event) => ({
-                ...event,
-                startDate: toDate(event.start),
-                endDate: toDate(event.end),
-              }))
-              .sort((a, b) => a.startDate - b.startDate)
-          );
+          setError("");
+          const snapshot = JSON.stringify(data.events);
+          if (snapshot !== lastSeen) {
+            // only touch the screen when the appointments really changed
+            lastSeen = snapshot;
+            setEvents(
+              data.events
+                .map((event) => ({
+                  ...event,
+                  startDate: toDate(event.start),
+                  endDate: toDate(event.end),
+                }))
+                .sort((a, b) => a.startDate - b.startDate)
+            );
+          }
         }
       } catch {
         if (active) {
           setError("Unable to load appointments. Please try again.");
         }
       } finally {
-        if (active) setLoadingEvents(false);
+        if (active && showLoading) setLoadingEvents(false);
       }
     }
 
-    loadAppointments();
+    loadAppointments(true);
 
-    const timer = setInterval(loadAppointments, 30000);
+    // Refresh every 30 s, but only while the tab is visible; refresh as soon as the tab is shown again.
+    const refreshIfVisible = () => {
+      if (!document.hidden) loadAppointments(false);
+    };
+    const timer = setInterval(refreshIfVisible, 30000);
+    document.addEventListener("visibilitychange", refreshIfVisible);
 
     return () => {
       active = false;
       clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshIfVisible);
     };
   }, [selectedDoctor]);
 

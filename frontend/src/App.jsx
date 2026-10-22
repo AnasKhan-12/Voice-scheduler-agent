@@ -119,7 +119,8 @@ function Schedule({ refreshKey }) {
       }
     }
     load();
-    const timer = setInterval(load, 30000);
+    // Refresh every 30 s, but only while the tab is visible.
+    const timer = setInterval(() => { if (!document.hidden) load(); }, 30000);
     return () => { cancelled = true; clearInterval(timer); };
   }, [refreshKey]);
 

@@ -3,15 +3,18 @@ import { useCallback, useEffect, useRef, useState } from "react";
 // Same logic as your live-call HTML page, packaged as one React hook.
 const MIC_RATE = 16000;
 const TTS_RATE = 24000;
-const SILENCE_LIMIT = 0.7; // seconds of quiet that end your turn
+const SILENCE_LIMIT = 0.6; // seconds of quiet that end your turn
 const MIN_VOICED = 0.25; // shorter sounds (clicks, coughs) are ignored
 const PREROLL_FRAMES = 8; // audio kept from just before you started talking
 const FLUSH_SAMPLES = 4096; // send mic audio roughly every 0.25 s
 
-// Barge-in (interrupting the agent while it speaks)
-const BARGE_FACTOR = 1; // while the agent talks, your voice must be this much above the normal threshold
-const BARGE_MIN_VOICED = 0.35; // seconds of sustained voice that count as an interruption
-const BARGE_PREROLL_FRAMES = 100; // ~0.8 s of mic audio kept so the start of your sentence isn't lost
+// Barge-in (interrupting the agent while it speaks).
+// Normally the SERVER's Silero VAD decides: we stream mic audio to it while the agent talks and it replies "barge_in".
+// BARGE_FACTOR / BARGE_MIN_VOICED are only the fallback, used when the server has no VAD model.
+const BARGE_FACTOR = 1.5;
+const BARGE_MIN_VOICED = 0.2;
+const BARGE_PREROLL_FRAMES = 125; // ~1 s of mic audio kept so the start of your sentence isn't lost
+const PROBE_SAMPLES = 1024; // mic audio sent to the server VAD in ~64 ms pieces
 
 const WORKLET_CODE = `
 class Capture extends AudioWorkletProcessor {
@@ -41,6 +44,27 @@ function flushAudio(s) {
   }
   s.pending = [];
   s.pendingLen = 0;
+}
+
+// Send mic audio to the server's VAD (only while the agent is speaking).
+function sendProbe(s, frame) {
+  s.probe.push(frame);
+  s.probeLen += frame.length;
+  if (s.probeLen < PROBE_SAMPLES) return;
+  if (s.ws?.readyState === WebSocket.OPEN) {
+    const out = new Float32Array(s.probeLen);
+    let off = 0;
+    for (const f of s.probe) {
+      out.set(f, off);
+      off += f.length;
+    }
+    const bytes = new Uint8Array(out.buffer);
+    let bin = "";
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    s.ws.send(JSON.stringify({ type: "probe", pcm: btoa(bin) }));
+  }
+  s.probe = [];
+  s.probeLen = 0;
 }
 
 function appendAudio(s, frame) {
@@ -86,6 +110,7 @@ export function useVoiceAgent() {
     playCtx: null, analyser: null, buf: null, nextTime: 0, raf: 0, timers: [],
     active: false, phase: "off", utterance: false, processing: false, muted: false,
     outGain: null, sources: [], interrupted: false, bargeVoiced: 0,
+    serverVad: false, probe: [], probeLen: 0,
     silence: 0, voiced: 0, preRoll: [], pending: [], pendingLen: 0,
     micLevel: 0, smooth: 0, msgId: 0,
     threshold: Number(localStorage.getItem("vs-threshold")) || 0.015,
@@ -107,12 +132,36 @@ export function useVoiceAgent() {
       if (!s.active) return;
       s.processing = false;
       s.bargeVoiced = 0;
+      s.probe = [];
+      s.probeLen = 0;
       setPartial("");
       go("listening");
     };
     if (delayMs > 0) r.current.timers.push(setTimeout(done, delayMs));
     else done();
   }, [go]);
+
+  // Silence the agent immediately and tell the server to stop generating audio.
+  const stopAgentAudio = useCallback(() => {
+    const s = r.current;
+    s.interrupted = true; // ignore any audio still in flight
+    s.timers.forEach(clearTimeout); // cancel the pending release() scheduled by tts_end
+    s.timers = [];
+    // Everything the agent says is routed through one gain node: cutting it silences all queued audio at once.
+    if (s.playCtx && s.analyser) {
+      try { s.outGain?.disconnect(); } catch { /* already disconnected */ }
+      s.outGain = s.playCtx.createGain();
+      s.outGain.connect(s.analyser);
+    }
+    for (const src of s.sources) {
+      try { src.onended = null; src.stop(); src.disconnect(); } catch { /* already stopped */ }
+    }
+    s.sources = [];
+    s.nextTime = 0;
+    s.probe = [];
+    s.probeLen = 0;
+    if (s.ws?.readyState === WebSocket.OPEN) s.ws.send(JSON.stringify({ type: "interrupt" }));
+  }, []);
 
   const onMessage = useCallback((e) => {
     const s = r.current;
@@ -126,6 +175,21 @@ export function useVoiceAgent() {
       if (data.text === "speaking...") go("speaking");
       else if (data.text === "done") release();
       else go("thinking");
+    } else if (data.type === "vad") {
+      s.serverVad = !!data.ready; // the server has a Silero VAD model, so it decides on interruptions
+    } else if (data.type === "barge_in") {
+      // The server's VAD heard the user talking over the agent: stop the agent and start recording.
+      if (s.phase !== "speaking" || s.utterance || s.muted) return;
+      if (s.ws?.readyState !== WebSocket.OPEN) return;
+      stopAgentAudio();
+      s.processing = false;
+      s.utterance = true;
+      s.silence = 0;
+      s.voiced = 0;
+      s.ws.send(JSON.stringify({ type: "start" }));
+      for (const f of s.preRoll) appendAudio(s, f);
+      s.preRoll = [];
+      go("hearing");
     } else if (data.type === "partial") {
       if (s.phase === "hearing") setPartial(data.text); // ignore late captions
     } else if (data.type === "transcript") {
@@ -148,27 +212,7 @@ export function useVoiceAgent() {
       const left = Math.max(0, s.nextTime - (s.playCtx?.currentTime ?? 0));
       release(left * 1000 + 250);
     }
-  }, [go, addMessage, release]);
-
-  // Silence the agent immediately and tell the server to stop generating audio.
-  const stopAgentAudio = useCallback(() => {
-    const s = r.current;
-    s.interrupted = true; // ignore any audio still in flight
-    s.timers.forEach(clearTimeout); // cancel the pending release() scheduled by tts_end
-    s.timers = [];
-    // Everything the agent says is routed through one gain node: cutting it silences all queued audio at once.
-    if (s.playCtx && s.analyser) {
-      try { s.outGain?.disconnect(); } catch { /* already disconnected */ }
-      s.outGain = s.playCtx.createGain();
-      s.outGain.connect(s.analyser);
-    }
-    for (const src of s.sources) {
-      try { src.onended = null; src.stop(); src.disconnect(); } catch { /* already stopped */ }
-    }
-    s.sources = [];
-    s.nextTime = 0;
-    if (s.ws?.readyState === WebSocket.OPEN) s.ws.send(JSON.stringify({ type: "interrupt" }));
-  }, []);
+  }, [go, addMessage, release, stopAgentAudio]);
 
   const handleFrame = useCallback((frame) => {
     const s = r.current;
@@ -185,15 +229,20 @@ export function useVoiceAgent() {
     const sec = frame.length / MIC_RATE;
 
     if (speaking && !s.utterance) {
-      const loud = rms > s.threshold * BARGE_FACTOR;
-      // Leaky counter: a quiet gap between syllables only slows it down instead of resetting it.
-      s.bargeVoiced = loud ? s.bargeVoiced + sec : Math.max(0, s.bargeVoiced - sec * 0.5);
-      if (s.bargeVoiced < BARGE_MIN_VOICED) {
-        s.preRoll.push(frame);
-        if (s.preRoll.length > BARGE_PREROLL_FRAMES) s.preRoll.shift();
+      s.preRoll.push(frame);
+      if (s.preRoll.length > BARGE_PREROLL_FRAMES) s.preRoll.shift();
+
+      if (s.serverVad) {
+        sendProbe(s, frame); // the server's Silero VAD decides and answers with "barge_in"
         return;
       }
+
+      // Fallback (server has no VAD model): simple loudness check with a leaky counter.
+      const loud = rms > s.threshold * BARGE_FACTOR;
+      s.bargeVoiced = loud ? s.bargeVoiced + sec : Math.max(0, s.bargeVoiced - sec * 0.5);
+      if (s.bargeVoiced < BARGE_MIN_VOICED) return;
       // Interruption confirmed: stop the agent, then fall through and start a normal utterance.
+      s.preRoll.pop(); // the current frame is appended again by the utterance-start code below
       s.bargeVoiced = 0;
       stopAgentAudio();
       s.processing = false;
@@ -262,7 +311,7 @@ export function useVoiceAgent() {
     if (s.playCtx && s.playCtx.state !== "closed") s.playCtx.close();
     Object.assign(s, {
       stream: null, worklet: null, source: null, micCtx: null, playCtx: null,
-      analyser: null, outGain: null, sources: [], interrupted: false, bargeVoiced: 0, utterance: false, processing: false, pending: [],
+      analyser: null, outGain: null, sources: [], interrupted: false, bargeVoiced: 0, serverVad: false, probe: [], probeLen: 0, utterance: false, processing: false, pending: [],
       pendingLen: 0, preRoll: [], silence: 0, voiced: 0, micLevel: 0, smooth: 0,
     });
     orbRef.current?.style.setProperty("--level", "0");
