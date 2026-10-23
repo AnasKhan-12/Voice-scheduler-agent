@@ -1,0 +1,16 @@
+channels
+daphne
+django
+faster-whisper
+google-api-python-client
+google-auth-oauthlib
+google-genai
+groq
+kokoro
+kokoro-onnx
+numpy
+onnxruntime
+python-dotenv
+sounddevice
+supabase
+tzlocal
